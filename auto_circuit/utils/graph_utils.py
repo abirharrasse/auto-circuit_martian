@@ -4,9 +4,10 @@ from collections import defaultdict
 from contextlib import contextmanager
 from itertools import chain, product
 from typing import Collection, Dict, Iterator, List, Optional, Set, Tuple
-
+import auto_circuit.model_utils.gemma_utils as gemma_utils
 import torch as t
 from transformer_lens import HookedTransformer, HookedTransformerKeyValueCache
+from transformers import GemmaModel, Gemma2Model 
 
 import auto_circuit.model_utils.micro_model_utils as mm_utils
 import auto_circuit.model_utils.sparse_autoencoders.autoencoder_transformer as sae_utils
@@ -167,6 +168,10 @@ def graph_edges(
             assert separate_qkv is not None, "separate_qkv must be specified for LLM"
             srcs: Set[SrcNode] = sae_utils.factorized_src_nodes(model)
             dests: Set[DestNode] = sae_utils.factorized_dest_nodes(model, separate_qkv)
+        elif isinstance(model, (GemmaModel, Gemma2Model)):  # Check for both possible Gemma model classes
+            assert separate_qkv is not None, "separate_qkv must be specified for Gemma"
+            srcs: Set[SrcNode] = gemma_utils.factorized_src_nodes(model)
+            dests: Set[DestNode] = gemma_utils.factorized_dest_nodes(model, separate_qkv)
         else:
             raise NotImplementedError(model)
         for i in [None] if seq_len is None else range(seq_len):
