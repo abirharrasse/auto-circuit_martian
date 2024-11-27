@@ -79,7 +79,9 @@ class PromptPairBatch:
 
 def collate_fn(batch: List[PromptPair]) -> PromptPairBatch:
     clean = t.stack([p.clean for p in batch])
+    print(clean.shape)
     corrupt = t.stack([p.corrupt for p in batch])
+    print(corrupt.shape)
     if all([p.answers.shape == batch[0].answers.shape for p in batch]):
         answers = t.stack([p.answers for p in batch])
     else:  # Sometimes each prompt has a different number of answers
@@ -228,74 +230,35 @@ def load_datasets_from_json(
     shuffle: bool = True,
     random_seed: int = 42,
     pad: bool = True,
+    max_length: Optional[int] = None,  # Maximum length for padding/truncation
 ) -> Tuple[PromptDataLoader, PromptDataLoader]:
     """
-    Load a dataset from a json file. The file should specify a list of
-    dictionaries with keys "clean_prompt" and "corrupt_prompt".
-
-    JSON data format:
-    ```
-    {
-        // Optional: used to label circuit visualization
-        "seq_labels": [str, ...],
-
-        // Optional: used by official circuit functions
-        "word_idxs": {
-            str: int,
-            ...
-        },
-
-        // Required: the prompt pairs
-        "prompts": [
-            {
-                "clean": str | [[int, ...], ...],
-                "corrupt": str | [[int, ...], ...],
-                "answers": [str, ...] | [int, ...],
-                "wrong_answers": [str, ...] | [int, ...],
-            },
-            ...
-        ]
-    }
-    ```
+    Load a dataset from a JSON file with additional handling for sequence length.
 
     Args:
-        model: Model to use for tokenization. If None, data must be pre-tokenized
-            (`"prompts"` is passed as `int`s).
-        path: Path to the json file with the dataset. If a list of paths is passed, the
-            first dataset is parsed in full and for the rest are the `prompts` are used.
+        model: Model to use for tokenization. If None, data must be pre-tokenized.
+        path: Path(s) to the JSON file(s) with the dataset.
         device: Device to load the data on.
-        prepend_bos: If True, prepend the `BOS` token to each prompt. (The `prepend_bos`
-            flag on TransformerLens `HookedTransformer`s is ignored.)
-        batch_size: The batch size for training and testing. If a single int is passed,
-            the same batch size is used for both.
-        return_seq_length: If `True`, return the sequence length of the prompts. **Note:
-            If `True`, all the prompts must have the same length or an error will be
-            raised.** This is used by
-            [`patchable_model`][auto_circuit.utils.graph_utils.patchable_model] to
-            enable patching specific token positions.
-        tail_divergence: If all prompts share a common prefix, remove it and compute the
-            keys and values for each attention head on the prefix. A `kv_cache` for the
-            prefix is returned in the `train_loader` and `test_loader`.
-        shuffle: If `True`, shuffle the dataset before splitting into train and test
-            sets.
-        random_seed: Seed for the random number generator.
-        pad: If `True`, pad the prompts to the maximum length in the batch. Do not use
-            in conjunction with `return_seq_length`.
+        prepend_bos: If True, prepend the `BOS` token to each prompt.
+        batch_size: Batch size for train/test loaders. If tuple, specify for both.
+        return_seq_length: Whether to return the final sequence length.
+        tail_divergence: If True, remove tokens before divergence in clean/corrupt prompts.
+        shuffle: Whether to shuffle the dataset before splitting.
+        random_seed: Seed for reproducibility.
+        pad: Whether to pad the sequences to `max_length`.
+        max_length: Maximum length for tokenization. Ensures uniform sequence lengths.
 
-    Note:
-        `shuffle` only shuffles the order of the prompts once at the beginning. The
-        order is preserved in the train and test loaders (`shuffle=False` is always
-        passed to the [`PromptDataLoader`][auto_circuit.data.PromptDataLoader]
-        constructor). This makes it easier to ensure experiments are deterministic.
+    Returns:
+        train_loader: Data loader for the training set.
+        test_loader: Data loader for the testing set.
     """
     assert not (prepend_bos and (model is None)), "Need model tokenizer to prepend bos"
 
-    # Load a dataset. If path is a list, only the first dataset is fully loaded.
+    # Load the dataset
     first_path = path if isinstance(path, Path) else path[0]
     assert isinstance(first_path, Path)
     with open(first_path, "r") as f:
         data = json.load(f)
-    # For other paths, only 'prompts' are added to dataset. (eg. seq_labels is ignored)
     if isinstance(path, list):
         assert all([isinstance(p, Path) for p in path])
         for p in path[1:]:
@@ -316,18 +279,18 @@ def load_datasets_from_json(
     word_idxs = data.get("word_idxs", {})
 
     if prepend_bos:
-        # Adjust word_idxs and seq_labels if prepending bos
-        seq_labels = ["<|BOS|>"] + seq_labels if seq_labels is not None else None
-        word_idxs = {k: v + int(prepend_bos) for k, v in word_idxs.items()}
+        seq_labels = ["<|BOS|>"] + seq_labels if seq_labels else None
+        word_idxs = {k: v + 1 for k, v in word_idxs.items()}
 
     kvs = []
     diverge_idx: int = 0
+
     if model is None:
         clean_prompts = [t.tensor(p).to(device) for p in clean_prompts]
         corrupt_prompts = [t.tensor(p).to(device) for p in corrupt_prompts]
         answers = [t.tensor(a).to(device) for a in answer_strs]
         wrong_answers = [t.tensor(a).to(device) for a in wrong_answer_strs]
-        seq_len = clean_prompts[0].shape[0]
+        seq_len = max(len(p) for p in clean_prompts) if pad and max_length is None else max_length
         assert not tail_divergence
     else:
         tokenizer: Any = model.tokenizer
@@ -335,17 +298,26 @@ def load_datasets_from_json(
             clean_prompts = [tokenizer.bos_token + p for p in clean_prompts]
             corrupt_prompts = [tokenizer.bos_token + p for p in corrupt_prompts]
         tokenizer.padding_side = "left"
-        clean_prompts = tokenizer(clean_prompts, padding=pad, return_tensors="pt")
-        corrupt_prompts = tokenizer(corrupt_prompts, padding=pad, return_tensors="pt")
-        seq_len = None
-        if return_seq_length:
-            assert t.all(clean_prompts["attention_mask"] == 1)
-            assert t.all(corrupt_prompts["attention_mask"] == 1)
-            seq_len = clean_prompts["input_ids"].shape[1]
-        ans_dicts: List[Dict] = [tokenizer(a, return_tensors="pt") for a in answer_strs]
-        wrong_ans_dicts: List[Dict] = [
-            tokenizer(a, return_tensors="pt") for a in wrong_answer_strs
-        ]
+
+        clean_prompts = tokenizer(
+            clean_prompts,
+            padding="max_length" if pad else False,
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+        corrupt_prompts = tokenizer(
+            corrupt_prompts,
+            padding="max_length" if pad else False,
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+
+        seq_len = max_length if max_length else clean_prompts["input_ids"].shape[1]
+        ans_dicts = [tokenizer(a, return_tensors="pt", max_length=max_length, truncation=True) for a in answer_strs]
+        wrong_ans_dicts = [tokenizer(a, return_tensors="pt", max_length=max_length, truncation=True) for a in wrong_answer_strs]
+
         clean_prompts = clean_prompts["input_ids"].to(device)
         corrupt_prompts = corrupt_prompts["input_ids"].to(device)
         answers = [a["input_ids"].squeeze(-1).to(device) for a in ans_dicts]
@@ -355,33 +327,10 @@ def load_datasets_from_json(
             diverge_idxs = (~(clean_prompts == corrupt_prompts)).int().argmax(dim=1)
             diverge_idx = int(diverge_idxs.min().item())
         if diverge_idx > 0:
-            seq_labels = seq_labels[diverge_idx:] if seq_labels is not None else None
-            prefixs, cfg, device = [], model.cfg, model.cfg.device
-            if isinstance(batch_size, tuple):
-                prefixs.append(clean_prompts[: (bs0 := batch_size[0]), :diverge_idx])
-                prefixs.append(clean_prompts[: (bs1 := batch_size[1]), :diverge_idx])
-                kvs.append(HookedTransformerKeyValueCache.init_cache(cfg, device, bs0))
-                kvs.append(HookedTransformerKeyValueCache.init_cache(cfg, device, bs1))
-            else:
-                prefixs.append(clean_prompts[:batch_size, :diverge_idx])
-                kvs.append(
-                    HookedTransformerKeyValueCache.init_cache(cfg, device, batch_size)
-                )
-
-            for prefix, kv_cache in zip(prefixs, kvs):
-                with t.inference_mode():
-                    model(prefix, past_kv_cache=kv_cache)
-                kv_cache.freeze()
-
-            print("seq_len before divergence", seq_len)
-            if return_seq_length:
-                assert seq_len is not None
-                seq_len -= diverge_idx
-            print("seq_len after divergence", seq_len)
-
-            # This must be done AFTER gathering the kv caches
+            seq_labels = seq_labels[diverge_idx:] if seq_labels else None
             clean_prompts = clean_prompts[:, diverge_idx:]
             corrupt_prompts = corrupt_prompts[:, diverge_idx:]
+            seq_len -= diverge_idx
 
     dataset = PromptDataset(clean_prompts, corrupt_prompts, answers, wrong_answers)
     train_set = Subset(dataset, list(range(train_test_size[0])))
@@ -390,7 +339,7 @@ def load_datasets_from_json(
         train_set,
         seq_len=seq_len,
         diverge_idx=diverge_idx,
-        kv_cache=kvs[0] if len(kvs) > 0 else None,
+        kv_cache=kvs[0] if kvs else None,
         seq_labels=seq_labels,
         word_idxs=word_idxs,
         batch_size=batch_size[0] if isinstance(batch_size, tuple) else batch_size,
@@ -400,7 +349,7 @@ def load_datasets_from_json(
         test_set,
         seq_len=seq_len,
         diverge_idx=diverge_idx,
-        kv_cache=kvs[-1] if len(kvs) > 0 else None,
+        kv_cache=kvs[-1] if kvs else None,
         seq_labels=seq_labels,
         word_idxs=word_idxs,
         batch_size=batch_size[1] if isinstance(batch_size, tuple) else batch_size,
