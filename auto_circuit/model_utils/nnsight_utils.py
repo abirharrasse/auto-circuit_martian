@@ -57,46 +57,49 @@ def get_layer_path(layer_idx: int, model_type: str) -> str:
 
 def factorized_src_nodes(model: LanguageModel) -> Set[SrcNode]:
     """Create source nodes for any HuggingFace model."""
-    cfg = get_model_config(model)
-    weight_paths = get_weight_paths(cfg['model_type'])
-    layers, idxs = count(), count()
     nodes = set()
     
-    # Add embedding layer
+    # Add embedding layer first
     nodes.add(
         SrcNode(
             name="Resid Start",
-            module_name="embed_tokens",
-            layer=next(layers),
-            src_idx=next(idxs),
-            weight=weight_paths['embed'],
+            module_name="embed_tokens",  # This will be found through get_module_safely
+            layer=0,
+            src_idx=0,
+            weight="embed_tokens"
         )
     )
 
-    # Add attention and MLP nodes for each layer
-    for layer_idx in range(cfg['n_layers']):
-        layer = next(layers)
-        layer_path = get_layer_path(layer_idx, cfg['model_type'])
-        
+    # Find number of layers by inspecting model structure
+    n_layers = None
+    try:
+        if hasattr(model.model, 'layers'):
+            n_layers = len(model.model.layers)
+        elif hasattr(model, 'layers'):
+            n_layers = len(model.layers)
+    except AttributeError:
+        raise ValueError("Could not determine number of model layers")
+
+    for layer_idx in range(n_layers):
         # Add attention outputs
         nodes.add(
             SrcNode(
                 name=f"A{layer_idx}",
-                module_name=f"{layer_path}.{cfg['attn_name']}",
-                layer=layer,
-                src_idx=next(idxs),
-                weight=f"{layer_path}.{cfg['attn_name']}.{weight_paths['o_proj']}",
+                module_name=f"layers[{layer_idx}].self_attn",
+                layer=layer_idx + 1,
+                src_idx=layer_idx * 2 + 1,
+                weight=f"layers[{layer_idx}].self_attn.o_proj"
             )
         )
         
-        # Add MLP outputs
+        # Add MLP outputs 
         nodes.add(
             SrcNode(
                 name=f"MLP {layer_idx}",
-                module_name=f"{layer_path}.mlp",
-                layer=layer,
-                src_idx=next(idxs),
-                weight=f"{layer_path}.mlp.{weight_paths['down_proj']}",
+                module_name=f"layers[{layer_idx}].mlp",
+                layer=layer_idx + 1,
+                src_idx=layer_idx * 2 + 2,
+                weight=f"layers[{layer_idx}].mlp.down_proj"
             )
         )
     
@@ -104,35 +107,39 @@ def factorized_src_nodes(model: LanguageModel) -> Set[SrcNode]:
 
 def factorized_dest_nodes(model: LanguageModel, separate_qkv: bool) -> Set[DestNode]:
     """Create destination nodes for any HuggingFace model."""
-    cfg = get_model_config(model)
-    weight_paths = get_weight_paths(cfg['model_type'])
-    layers = count(1)
     nodes = set()
     
-    for layer_idx in range(cfg['n_layers']):
-        layer = next(layers)
-        layer_path = get_layer_path(layer_idx, cfg['model_type'])
-        
-        # Add attention nodes
+    # Find number of layers
+    n_layers = None
+    try:
+        if hasattr(model.model, 'layers'):
+            n_layers = len(model.model.layers)
+        elif hasattr(model, 'layers'):
+            n_layers = len(model.layers)
+    except AttributeError:
+        raise ValueError("Could not determine number of model layers")
+
+    for layer_idx in range(n_layers):
+        # Add attention components
         if separate_qkv:
             for proj, name in [('q_proj', 'Q'), ('k_proj', 'K'), ('v_proj', 'V')]:
                 nodes.add(
                     DestNode(
                         name=f"A{layer_idx}.{name}",
-                        module_name=f"{layer_path}.{cfg['attn_name']}",
-                        layer=layer,
+                        module_name=f"layers[{layer_idx}].self_attn",
+                        layer=layer_idx + 1,
                         head_dim=None,
-                        weight=f"{layer_path}.{cfg['attn_name']}.{weight_paths[proj]}",
+                        weight=f"layers[{layer_idx}].self_attn.{proj}"
                     )
                 )
         else:
             nodes.add(
                 DestNode(
                     name=f"A{layer_idx}",
-                    module_name=f"{layer_path}.{cfg['attn_name']}",
-                    layer=layer,
+                    module_name=f"layers[{layer_idx}].self_attn",
+                    layer=layer_idx + 1,
                     head_dim=None,
-                    weight=f"{layer_path}.{cfg['attn_name']}.weight",
+                    weight=f"layers[{layer_idx}].self_attn.weight"
                 )
             )
         
@@ -140,9 +147,9 @@ def factorized_dest_nodes(model: LanguageModel, separate_qkv: bool) -> Set[DestN
         nodes.add(
             DestNode(
                 name=f"MLP {layer_idx}",
-                module_name=f"{layer_path}.mlp",
-                layer=layer,
-                weight=f"{layer_path}.mlp.{weight_paths['up_proj']}",
+                module_name=f"layers[{layer_idx}].mlp",
+                layer=layer_idx + 1,
+                weight=f"layers[{layer_idx}].mlp.up_proj"
             )
         )
     
@@ -151,8 +158,8 @@ def factorized_dest_nodes(model: LanguageModel, separate_qkv: bool) -> Set[DestN
         DestNode(
             name="Norm End",
             module_name="norm",
-            layer=next(layers),
-            weight=weight_paths['lm_head'],
+            layer=n_layers + 1,
+            weight="lm_head"
         )
     )
     
