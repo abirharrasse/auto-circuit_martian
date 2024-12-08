@@ -76,19 +76,85 @@ def remove_hooks() -> Iterator[Set[RemovableHandle]]:
             handle.remove()
 
 
-def module_by_name(model: Any, module_name: str) -> t.nn.Module:
+from functools import reduce
+from typing import Any, Optional
+from transformers import PreTrainedModel
+
+def get_transformer_base(model: PreTrainedModel) -> Optional[str]:
     """
-    Gets a module from a model by name.
-
+    Get the base attribute name containing transformer layers for different HF architectures.
+    
     Args:
-        model: The model to get the module from.
-        module_name: The name of the module to get.
-
+        model: HuggingFace model instance
+    
     Returns:
-        The module.
+        Base attribute name or None if not found
+    """
+    # Common attribute names for different architectures
+    possible_bases = [
+        'model',           # LLaMA, Qwen
+        'transformer',     # GPT2
+        'encoder',        # BERT
+        'decoder',        # T5
+        'albert',         # ALBERT
+        'roberta',        # RoBERTa
+    ]
+    
+    for base in possible_bases:
+        if hasattr(model, base):
+            # Verify this attribute actually contains the layers
+            base_module = getattr(model, base)
+            if hasattr(base_module, 'layers') or hasattr(base_module, 'layer'):
+                return base
+    return None
+
+def module_by_name(model: Any, module_name: str) -> Any:
+    """
+    Gets a module from a model by name, handling different HF model architectures.
+    
+    Args:
+        model: The model to get the module from
+        module_name: The name of the module
+        
+    Returns:
+        The requested module
     """
     init_mod = [model.wrapped_model] if hasattr(model, "wrapped_model") else [model]
-    return reduce(getattr, init_mod + module_name.split("."))  # type: ignore
+    model_instance = init_mod[0]
+    
+    # Only process if it's a HF model
+    if isinstance(model_instance, PreTrainedModel):
+        # If the path starts with 'layers' or 'layer', we need to prepend the base
+        if module_name.startswith(('layers', 'layer')):
+            base = get_transformer_base(model_instance)
+            if base:
+                module_name = f"{base}.{module_name}"
+    
+    return reduce(getattr, init_mod + module_name.split("."))
+
+# Helper function to get the correct layer path for a model
+def get_layer_path(model: PreTrainedModel, layer_idx: int) -> str:
+    """
+    Get the correct path to a transformer layer for any HF model.
+    
+    Args:
+        model: HuggingFace model instance
+        layer_idx: Index of the layer
+        
+    Returns:
+        Full path to the layer as a string
+    """
+    base = get_transformer_base(model)
+    if not base:
+        raise ValueError("Could not determine model architecture")
+        
+    # Handle different naming conventions
+    if hasattr(getattr(model, base), 'layers'):
+        return f"{base}.layers.{layer_idx}"
+    elif hasattr(getattr(model, base), 'layer'):
+        return f"{base}.layer.{layer_idx}"
+    else:
+        raise ValueError("Could not find layers in model")
 
 
 def set_module_by_name(model: Any, module_name: str, new_module: t.nn.Module):
