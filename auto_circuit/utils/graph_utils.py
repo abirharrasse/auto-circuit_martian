@@ -199,7 +199,7 @@ def make_model_patchable(
     seq_len: Optional[int] = None,
     seq_dim: Optional[int] = None,
 ) -> Tuple[Set[PatchWrapperImpl], Set[PatchWrapperImpl], Set[PatchWrapperImpl]]:
-    """Modified to handle LLaMA model structure"""
+    """Modified to properly handle array-style module access"""
     node_dict: Dict[str, Set[Node]] = defaultdict(set)
     [node_dict[node.module_name].add(node) for node in nodes]
     wrappers, src_wrappers, dest_wrappers = set(), set(), set()
@@ -213,18 +213,36 @@ def make_model_patchable(
     is_nnsight = isinstance(model, LanguageModel)
     
     for module_name, module_nodes in node_dict.items():
-        # Handle potential missing modules gracefully
+        # Get module using array-style access
         try:
             if is_nnsight:
-                module = get_module_safely(model, module_name)
+                # Get base model
+                current = model.model
+                
+                # Split path and handle each part
+                parts = module_name.split('.')
+                
+                for part in parts:
+                    if '[' in part and ']' in part:
+                        # Handle array indexing
+                        name, idx = part.split('[')
+                        idx = int(idx.rstrip(']'))
+                        # Get the list/ModuleList first
+                        current = getattr(current, name)
+                        # Then index into it
+                        current = current[idx]
+                    else:
+                        current = getattr(current, part)
+                
+                module = current
+                
+                if module is None:
+                    print(f"Warning: Could not find module {module_name}")
+                    continue
             else:
                 module = module_by_name(model, module_name)
                 
-            if module is None:
-                print(f"Warning: Could not find module {module_name}")
-                continue
-                
-        except AttributeError:
+        except (AttributeError, IndexError):
             print(f"Warning: Could not find module {module_name}")
             continue
             
@@ -266,7 +284,27 @@ def make_model_patchable(
         )
         
         if is_nnsight:
-            set_module_safely(model, module_name, wrapper)
+            # Set module using array-style access
+            current = model.model
+            parts = module_name.split('.')
+            # Navigate to parent module
+            for part in parts[:-1]:
+                if '[' in part and ']' in part:
+                    name, idx = part.split('[')
+                    idx = int(idx.rstrip(']'))
+                    current = getattr(current, name)[idx]
+                else:
+                    current = getattr(current, part)
+            
+            # Set the final module
+            last_part = parts[-1]
+            if '[' in last_part and ']' in last_part:
+                name, idx = last_part.split('[')
+                idx = int(idx.rstrip(']'))
+                module_list = getattr(current, name)
+                module_list[idx] = wrapper
+            else:
+                setattr(current, last_part, wrapper)
         else:
             set_module_by_name(model, module_name, wrapper)
             
