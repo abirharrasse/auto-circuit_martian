@@ -18,36 +18,32 @@ def normalize_module_path(path: str) -> str:
 
 def get_module_safely(model: LanguageModel, path: str) -> Any:
     """Safely get a module by path, handling different model structures."""
+    # First normalize the path
     path = normalize_module_path(path)
     
-    try:
-        # For direct array-style access
-        parts = path.split('.')
-        current = model
-        for part in parts:
-            if '[' in part:
-                # Handle array indexing
-                name, idx = part.split('[')
-                idx = int(idx.rstrip(']'))
-                current = getattr(current, name)[idx]
-            else:
-                current = getattr(current, part)
-        return current
-    except (AttributeError, IndexError):
+    # List of possible model prefixes/structures to try
+    model_paths = [
+        lambda m: m,  # Direct access
+        lambda m: m.model,  # Through model.model
+        lambda m: m.model.model,  # Some models have nested .model attributes
+    ]
+    
+    for get_base in model_paths:
         try:
-            # Try with model.model prefix
-            if hasattr(model, 'model'):
-                current = model.model
-                for part in parts:
-                    if '[' in part:
-                        name, idx = part.split('[')
-                        idx = int(idx.rstrip(']'))
-                        current = getattr(current, name)[idx]
-                    else:
-                        current = getattr(current, part)
-                return current
+            current = get_base(model)
+            parts = path.split('.')
+            for part in parts:
+                if '[' in part:
+                    name, idx = part.split('[')
+                    idx = int(idx.rstrip(']'))
+                    current = getattr(current, name)[idx]
+                else:
+                    current = getattr(current, part)
+            return current
         except (AttributeError, IndexError):
-            pass
+            continue
+            
+    print(f"Warning: Could not find module {path}")
     return None
 
 def get_layer_path(layer_idx: int, model_type: str) -> str:
