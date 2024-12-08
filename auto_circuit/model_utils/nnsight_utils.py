@@ -6,8 +6,7 @@ from auto_circuit.types import SrcNode, DestNode
 
 def factorized_src_nodes(model: LanguageModel) -> Set[SrcNode]:
     """
-    Get the source part of each edge in the factorized graph for nnsight models.
-    Following the same structure as transformer_lens implementation.
+    Get the source nodes for LLaMA model structure.
     """
     layers, idxs = count(), count()
     nodes = set()
@@ -28,26 +27,22 @@ def factorized_src_nodes(model: LanguageModel) -> Set[SrcNode]:
         layer = next(layers)
         
         # Add attention head outputs
-        for head_idx in range(model.config.num_attention_heads):
-            nodes.add(
-                SrcNode(
-                    name=f"A{layer_idx}.{head_idx}",
-                    module_name=f"model.layers.{layer_idx}.self_attn",
-                    layer=layer,
-                    src_idx=next(idxs),
-                    head_dim=2,
-                    head_idx=head_idx,
-                    weight=f"model.layers.{layer_idx}.self_attn.o_proj.weight",
-                    weight_head_dim=0,
-                )
+        nodes.add(
+            SrcNode(
+                name=f"A{layer_idx}",
+                module_name=f"model.layers.{layer_idx}.self_attn",
+                layer=layer,
+                src_idx=next(idxs),
+                weight=f"model.layers.{layer_idx}.self_attn.o_proj.weight",
             )
+        )
         
         # Add MLP outputs
         nodes.add(
             SrcNode(
                 name=f"MLP {layer_idx}",
                 module_name=f"model.layers.{layer_idx}.mlp",
-                layer=layer,  # Note: might need next(layers) depending on parallel_attn_mlp
+                layer=layer,
                 src_idx=next(idxs),
                 weight=f"model.layers.{layer_idx}.mlp.down_proj.weight",
             )
@@ -57,8 +52,7 @@ def factorized_src_nodes(model: LanguageModel) -> Set[SrcNode]:
 
 def factorized_dest_nodes(model: LanguageModel, separate_qkv: bool) -> Set[DestNode]:
     """
-    Get the destination part of each edge in the factorized graph for nnsight models.
-    Following the same structure as transformer_lens implementation.
+    Get the destination nodes for LLaMA model structure.
     """
     layers = count(1)
     nodes = set()
@@ -66,51 +60,65 @@ def factorized_dest_nodes(model: LanguageModel, separate_qkv: bool) -> Set[DestN
     for layer_idx in range(len(model.model.layers)):
         layer = next(layers)
         
-        # Add attention nodes
-        for head_idx in range(model.config.num_attention_heads):
-            if separate_qkv:
-                # Add separate Q, K, V nodes for each head
-                for letter in ["Q", "K", "V"]:
-                    nodes.add(
-                        DestNode(
-                            name=f"A{layer_idx}.{head_idx}.{letter}",
-                            module_name=f"model.layers.{layer_idx}.self_attn.{letter.lower()}_proj",
-                            layer=layer,
-                            head_dim=2,
-                            head_idx=head_idx,
-                            weight=f"model.layers.{layer_idx}.self_attn.{letter.lower()}_proj.weight",
-                            weight_head_dim=0,
-                        )
-                    )
-            else:
-                # Combined QKV node
-                nodes.add(
-                    DestNode(
-                        name=f"A{layer_idx}.{head_idx}",
-                        module_name=f"model.layers.{layer_idx}.self_attn",
-                        layer=layer,
-                        head_dim=2,
-                        head_idx=head_idx,
-                        weight=f"model.layers.{layer_idx}.self_attn.qkv_proj.weight",
-                        weight_head_dim=0,
-                    )
+        # Add attention nodes with LLaMA-specific structure
+        if separate_qkv:
+            # Add Q projection (2048 -> 2048)
+            nodes.add(
+                DestNode(
+                    name=f"A{layer_idx}.Q",
+                    module_name=f"model.layers.{layer_idx}.self_attn.q_proj",
+                    layer=layer,
+                    head_dim=None,  # LLaMA handles heads differently
+                    weight=f"model.layers.{layer_idx}.self_attn.q_proj.weight",
                 )
+            )
+            # Add K projection (2048 -> 512)
+            nodes.add(
+                DestNode(
+                    name=f"A{layer_idx}.K",
+                    module_name=f"model.layers.{layer_idx}.self_attn.k_proj",
+                    layer=layer,
+                    head_dim=None,
+                    weight=f"model.layers.{layer_idx}.self_attn.k_proj.weight",
+                )
+            )
+            # Add V projection (2048 -> 512)
+            nodes.add(
+                DestNode(
+                    name=f"A{layer_idx}.V",
+                    module_name=f"model.layers.{layer_idx}.self_attn.v_proj",
+                    layer=layer,
+                    head_dim=None,
+                    weight=f"model.layers.{layer_idx}.self_attn.v_proj.weight",
+                )
+            )
+        else:
+            # Combined attention node
+            nodes.add(
+                DestNode(
+                    name=f"A{layer_idx}",
+                    module_name=f"model.layers.{layer_idx}.self_attn",
+                    layer=layer,
+                    head_dim=None,
+                    weight=f"model.layers.{layer_idx}.self_attn.weight",
+                )
+            )
         
-        # Add MLP nodes
+        # Add MLP node
         nodes.add(
             DestNode(
                 name=f"MLP {layer_idx}",
                 module_name=f"model.layers.{layer_idx}.mlp",
-                layer=layer,  # Note: might need next(layers) depending on parallel_attn_mlp
+                layer=layer,
                 weight=f"model.layers.{layer_idx}.mlp.up_proj.weight",
             )
         )
     
-    # Add final residual output node
+    # Add final layer norm
     nodes.add(
         DestNode(
-            name="Resid End",
-            module_name=f"model.layers.{len(model.model.layers) - 1}.final_layernorm",
+            name="Norm End",
+            module_name="model.norm",
             layer=next(layers),
             weight="lm_head.weight",
         )
@@ -120,8 +128,7 @@ def factorized_dest_nodes(model: LanguageModel, separate_qkv: bool) -> Set[DestN
 
 def simple_graph_nodes(model: LanguageModel) -> Tuple[Set[SrcNode], Set[DestNode]]:
     """
-    Get the nodes of the unfactorized graph for nnsight models.
-    Following the same structure as transformer_lens implementation.
+    Get the nodes of the unfactorized graph for LLaMA model.
     """
     layers, src_idxs = count(), count()
     src_nodes, dest_nodes = set(), set()
@@ -140,22 +147,18 @@ def simple_graph_nodes(model: LanguageModel) -> Tuple[Set[SrcNode], Set[DestNode
             )
         )
         
-        # Add attention head outputs
-        for head_idx in range(model.config.num_attention_heads):
-            src_nodes.add(
-                SrcNode(
-                    name=f"A{layer_idx}.{head_idx}",
-                    module_name=f"model.layers.{layer_idx}.self_attn",
-                    layer=layer,
-                    src_idx=next(src_idxs),
-                    head_idx=head_idx,
-                    head_dim=2,
-                    weight=f"model.layers.{layer_idx}.self_attn.o_proj.weight",
-                    weight_head_dim=0,
-                )
+        # Add attention outputs
+        src_nodes.add(
+            SrcNode(
+                name=f"A{layer_idx}",
+                module_name=f"model.layers.{layer_idx}.self_attn",
+                layer=layer,
+                src_idx=next(src_idxs),
+                weight=f"model.layers.{layer_idx}.self_attn.o_proj.weight",
             )
+        )
         
-        # Add mid-layer residual connection
+        # Add mid-layer residual
         layer = next(layers)
         dest_nodes.add(
             DestNode(
@@ -187,13 +190,13 @@ def simple_graph_nodes(model: LanguageModel) -> Tuple[Set[SrcNode], Set[DestNode
             )
         )
         
-        # Handle final residual connection
+        # Handle final layer
         last_layer = layer_idx + 1 == len(model.model.layers)
         layer = next(layers)
         dest_nodes.add(
             DestNode(
-                name="Resid End" if last_layer else f"Resid Post {layer_idx}",
-                module_name=f"model.layers.{layer_idx}.final_layernorm" if last_layer else f"model.layers.{layer_idx}.post_attention_layernorm",
+                name="Norm End" if last_layer else f"Resid Post {layer_idx}",
+                module_name="model.norm" if last_layer else f"model.layers.{layer_idx}.post_attention_layernorm",
                 layer=layer,
                 min_src_idx=min_src_idx,
             )
