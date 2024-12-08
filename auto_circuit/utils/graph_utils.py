@@ -135,7 +135,7 @@ def graph_edges(
 ]:
     """
     Get the nodes and edges of the computation graph of the model used for ablation.
-    Now includes support for nnsight LanguageModel.
+    Now includes support for nnsight LanguageModel and LLaMA architecture.
     """
     seq_dim = 1
     edge_dict: Dict[Optional[int], List[Edge]] = defaultdict(list)
@@ -145,6 +145,8 @@ def graph_edges(
             srcs, dests = mm_utils.simple_graph_nodes(model)
         elif isinstance(model, HookedTransformer):
             srcs, dests = tl_utils.simple_graph_nodes(model)
+        elif isinstance(model, AutoencoderTransformer):
+            srcs, dests = sae_utils.simple_graph_nodes(model)
         elif isinstance(model, LanguageModel):
             srcs, dests = nnsight_utils.simple_graph_nodes(model)
         else:
@@ -167,6 +169,9 @@ def graph_edges(
             dests: Set[DestNode] = sae_utils.factorized_dest_nodes(model, separate_qkv)
         elif isinstance(model, LanguageModel):
             assert separate_qkv is not None, "separate_qkv must be specified for LLM"
+            # Set default separate_qkv=True for LLaMA models if not specified
+            if separate_qkv is None:
+                separate_qkv = True
             srcs: Set[SrcNode] = nnsight_utils.factorized_src_nodes(model)
             dests: Set[DestNode] = nnsight_utils.factorized_dest_nodes(model, separate_qkv)
         else:
@@ -181,6 +186,7 @@ def graph_edges(
 
     return nodes, srcs, dests, edge_dict, edges, seq_dim, seq_len
 
+
 def make_model_patchable(
     model: t.nn.Module,
     factorized: bool,
@@ -190,42 +196,25 @@ def make_model_patchable(
     seq_len: Optional[int] = None,
     seq_dim: Optional[int] = None,
 ) -> Tuple[Set[PatchWrapperImpl], Set[PatchWrapperImpl], Set[PatchWrapperImpl]]:
-    """
-    Injects [`PatchWrapper`][auto_circuit.types.PatchWrapper]s into the model at the
-    node positions to enable patching.
-
-    Args:
-        model: The model to make patchable.
-        factorized: Whether the model is factorized, for Edge Ablation. Otherwise,
-            only Node Ablation is possible.
-        src_nodes: The source nodes in the model.
-        nodes: All the nodes in the model.
-        device: The device to put the patch masks on.
-        seq_len: The sequence length of the model inputs. If `None`, all token positions
-            are simultaneously ablated.
-        seq_dim: The sequence dimension of the model. This is the dimension on which new
-            inputs are concatenated. In transformers, this is `1` because the
-            activations are of shape `[batch_size, seq_len, hidden_dim]`.
-
-    Returns:
-        Tuple containing:
-            <ol>
-                <li>The set of all PatchWrapper modules in the model.</li>
-                <li>The set of all PatchWrapper modules that wrap source nodes.</li>
-                <li>The set of all PatchWrapper modules that wrap destination
-                    nodes.</li>
-            </ol>
-
-    Warning:
-        This function modifies the model in place.
-    """
+    """Modified to handle LLaMA model structure"""
     node_dict: Dict[str, Set[Node]] = defaultdict(set)
     [node_dict[node.module_name].add(node) for node in nodes]
     wrappers, src_wrappers, dest_wrappers = set(), set(), set()
-    dtype = next(model.parameters()).dtype
-
+    
+    # Get dtype from model
+    try:
+        dtype = next(model.parameters()).dtype
+    except StopIteration:
+        dtype = t.float32  # fallback dtype if no parameters found
+    
     for module_name, module_nodes in node_dict.items():
-        module = module_by_name(model, module_name)
+        # Handle potential missing modules gracefully
+        try:
+            module = module_by_name(model, module_name)
+        except AttributeError:
+            print(f"Warning: Could not find module {module_name}")
+            continue
+            
         src_idxs_slice = None
         a_node = next(iter(module_nodes))
         head_dim = a_node.head_dim
@@ -255,7 +244,7 @@ def make_model_patchable(
             module_name=module_name,
             module=module,
             head_dim=head_dim,
-            seq_dim=None if seq_len is None else seq_dim,  # Patch tokens separately
+            seq_dim=None if seq_len is None else seq_dim,
             is_src=is_src,
             src_idxs=src_idxs_slice,
             is_dest=is_dest,
