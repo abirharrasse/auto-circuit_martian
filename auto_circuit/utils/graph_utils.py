@@ -38,8 +38,6 @@ except ImportError:
     LanguageModel = type(None)  # Type to check against if nnsight not installed
 
 
-[rest of your code remains exactly the same until the patchable_model function where we make these changes:]
-
 def patchable_model(
     model: t.nn.Module,
     factorized: bool,
@@ -120,8 +118,6 @@ def patchable_model(
         wrapped_model=model,
     )
 
-
-[In the graph_edges function, modify the cases:]
 
 def graph_edges(
     model: t.nn.Module,
