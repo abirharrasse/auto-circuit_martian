@@ -32,10 +32,9 @@ from auto_circuit.utils.patch_wrapper import PatchWrapperImpl
 from auto_circuit.utils.patchable_model import PatchableModel
 from auto_circuit.utils.tensor_ops import desc_prune_scores
 
-try:
-    from nnsight import LanguageModel
-except ImportError:
-    LanguageModel = type(None)  # Type to check against if nnsight not installed
+from nnsight import LanguageModel
+import auto_circuit.model_utils.nnsight_utils as nn_utils  # Reference to the utils we created
+
 
 
 def patchable_model(
@@ -119,6 +118,7 @@ def patchable_model(
     )
 
 
+
 def graph_edges(
     model: t.nn.Module,
     factorized: bool,
@@ -135,27 +135,30 @@ def graph_edges(
 ]:
     """
     Get the nodes and edges of the computation graph of the model used for ablation.
-    Now includes support for nnsight LanguageModel and HuggingFace models.
+
+    Args:
+        model: The model to get the edges for.
+        factorized: Whether the model is factorized, for Edge Ablation. Otherwise,
+            only Node Ablation is possible.
+        separate_qkv: Whether the model has separate query, key, and value inputs. Only
+            used for transformers.
+        seq_len: The sequence length of the model inputs. If `None`, all token positions
+            are simultaneously ablated.
+
+    Returns:
+        Tuple containing the nodes and edges of the computation graph.
     """
     seq_dim = 1
     edge_dict: Dict[Optional[int], List[Edge]] = defaultdict(list)
-    
-    # Check if it's a nnsight model
-    is_nnsight = isinstance(model, LanguageModel)
-    
     if not factorized:
         if isinstance(model, MicroModel):
             srcs, dests = mm_utils.simple_graph_nodes(model)
         elif isinstance(model, HookedTransformer):
             srcs, dests = tl_utils.simple_graph_nodes(model)
-        elif isinstance(model, AutoencoderTransformer):
-            srcs, dests = sae_utils.simple_graph_nodes(model)
-        elif is_nnsight:
-            # For nnsight models, use our generic HF implementation
-            srcs, dests = nnsight_utils.simple_graph_nodes(model)
+        elif isinstance(model, LanguageModel):
+            srcs, dests = nn_utils.simple_graph_nodes(model)
         else:
-            raise NotImplementedError(f"Model type not supported: {type(model)}")
-            
+            raise NotImplementedError(model)
         for i in [None] if seq_len is None else range(seq_len):
             pairs = product(srcs, dests)
             edge_dict[i] = [Edge(s, d, i) for s, d in pairs if s.layer + 1 == d.layer]
@@ -171,23 +174,25 @@ def graph_edges(
             assert separate_qkv is not None, "separate_qkv must be specified for LLM"
             srcs: Set[SrcNode] = sae_utils.factorized_src_nodes(model)
             dests: Set[DestNode] = sae_utils.factorized_dest_nodes(model, separate_qkv)
-        elif is_nnsight:
-            # For nnsight models, assume separate_qkv=True if not specified
-            if separate_qkv is None:
-                separate_qkv = True
-            srcs: Set[SrcNode] = nnsight_utils.factorized_src_nodes(model)
-            dests: Set[DestNode] = nnsight_utils.factorized_dest_nodes(model, separate_qkv)
+        elif isinstance(model, LanguageModel):
+            assert separate_qkv is not None, "separate_qkv must be specified for LLM"
+            srcs: Set[SrcNode] = nn_utils.factorized_src_nodes(model)
+            dests: Set[DestNode] = nn_utils.factorized_dest_nodes(model, separate_qkv)
         else:
-            raise NotImplementedError(f"Model type not supported: {type(model)}")
-            
+            raise NotImplementedError(model)
         for i in [None] if seq_len is None else range(seq_len):
             pairs = product(srcs, dests)
             edge_dict[i] = [Edge(s, d, i) for s, d in pairs if s.layer < d.layer]
-            
     nodes: Set[Node] = set(srcs | dests)
     edges = set(list(chain.from_iterable(edge_dict.values())))
 
     return nodes, srcs, dests, edge_dict, edges, seq_dim, seq_len
+
+
+
+
+
+
 
 
 def make_model_patchable(
