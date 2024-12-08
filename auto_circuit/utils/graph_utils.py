@@ -210,10 +210,20 @@ def make_model_patchable(
     except StopIteration:
         dtype = t.float32  # fallback dtype if no parameters found
     
+    is_nnsight = isinstance(model, LanguageModel)
+    
     for module_name, module_nodes in node_dict.items():
         # Handle potential missing modules gracefully
         try:
-            module = module_by_name(model, module_name)
+            if is_nnsight:
+                module = get_module_safely(model, module_name)
+            else:
+                module = module_by_name(model, module_name)
+                
+            if module is None:
+                print(f"Warning: Could not find module {module_name}")
+                continue
+                
         except AttributeError:
             print(f"Warning: Could not find module {module_name}")
             continue
@@ -254,7 +264,12 @@ def make_model_patchable(
             patch_mask=mask,
             in_srcs=in_srcs,
         )
-        set_module_by_name(model, module_name, wrapper)
+        
+        if is_nnsight:
+            set_module_safely(model, module_name, wrapper)
+        else:
+            set_module_by_name(model, module_name, wrapper)
+            
         wrappers.add(wrapper)
         src_wrappers.add(wrapper) if is_src else None
         dest_wrappers.add(wrapper) if is_dest else None
