@@ -135,10 +135,13 @@ def graph_edges(
 ]:
     """
     Get the nodes and edges of the computation graph of the model used for ablation.
-    Now includes support for nnsight LanguageModel and LLaMA architecture.
+    Now includes support for nnsight LanguageModel and HuggingFace models.
     """
     seq_dim = 1
     edge_dict: Dict[Optional[int], List[Edge]] = defaultdict(list)
+    
+    # Check if it's a nnsight model
+    is_nnsight = isinstance(model, LanguageModel)
     
     if not factorized:
         if isinstance(model, MicroModel):
@@ -147,7 +150,8 @@ def graph_edges(
             srcs, dests = tl_utils.simple_graph_nodes(model)
         elif isinstance(model, AutoencoderTransformer):
             srcs, dests = sae_utils.simple_graph_nodes(model)
-        elif isinstance(model, LanguageModel):
+        elif is_nnsight:
+            # For nnsight models, use our generic HF implementation
             srcs, dests = nnsight_utils.simple_graph_nodes(model)
         else:
             raise NotImplementedError(f"Model type not supported: {type(model)}")
@@ -167,9 +171,8 @@ def graph_edges(
             assert separate_qkv is not None, "separate_qkv must be specified for LLM"
             srcs: Set[SrcNode] = sae_utils.factorized_src_nodes(model)
             dests: Set[DestNode] = sae_utils.factorized_dest_nodes(model, separate_qkv)
-        elif isinstance(model, LanguageModel):
-            assert separate_qkv is not None, "separate_qkv must be specified for LLM"
-            # Set default separate_qkv=True for LLaMA models if not specified
+        elif is_nnsight:
+            # For nnsight models, assume separate_qkv=True if not specified
             if separate_qkv is None:
                 separate_qkv = True
             srcs: Set[SrcNode] = nnsight_utils.factorized_src_nodes(model)
